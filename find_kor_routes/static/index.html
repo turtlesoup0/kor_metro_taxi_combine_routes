@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>혼합 경로 탐색</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, 'Pretendard', sans-serif; background: #f5f5f7; color: #1d1d1f; }
+
+.header { background: #fff; border-bottom: 1px solid #e5e5e7; padding: 16px 24px; }
+.header h1 { font-size: 20px; font-weight: 600; }
+
+.container { display: flex; height: calc(100vh - 57px); }
+
+/* 왼쪽 패널 */
+.panel { width: 420px; min-width: 420px; background: #fff; border-right: 1px solid #e5e5e7;
+         display: flex; flex-direction: column; overflow: hidden; }
+
+.search-form { padding: 16px; border-bottom: 1px solid #e5e5e7; }
+.search-form label { display: block; font-size: 12px; font-weight: 600; color: #86868b; margin-bottom: 4px; }
+.search-form input[type="text"] { width: 100%; padding: 10px 12px; border: 1px solid #d2d2d7; border-radius: 8px;
+                      font-size: 14px; margin-bottom: 12px; outline: none; }
+.search-form input[type="text"]:focus { border-color: #0071e3; box-shadow: 0 0 0 3px rgba(0,113,227,0.15); }
+.search-form button { width: 100%; padding: 10px; background: #0071e3; color: #fff; border: none;
+                       border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; }
+.search-form button:hover { background: #0077ed; }
+.search-form button:disabled { background: #d2d2d7; cursor: not-allowed; }
+
+/* 선호도 옵션 */
+.options-toggle { font-size: 12px; color: #0071e3; cursor: pointer; margin-bottom: 12px;
+                  display: flex; align-items: center; gap: 4px; user-select: none; }
+.options-toggle:hover { text-decoration: underline; }
+.options-panel { display: none; margin-bottom: 12px; padding: 12px; background: #f9f9fb;
+                 border-radius: 8px; border: 1px solid #e5e5e7; }
+.options-panel.show { display: block; }
+
+.opt-group { margin-bottom: 10px; }
+.opt-group:last-child { margin-bottom: 0; }
+.opt-label { font-size: 11px; font-weight: 600; color: #86868b; margin-bottom: 6px; }
+
+.opt-radios { display: flex; gap: 6px; flex-wrap: wrap; }
+.opt-radios label { font-size: 12px; padding: 5px 10px; background: #fff; border: 1px solid #d2d2d7;
+                    border-radius: 6px; cursor: pointer; transition: all 0.15s; }
+.opt-radios input { display: none; }
+.opt-radios input:checked + span { color: #0071e3; }
+.opt-radios label:has(input:checked) { border-color: #0071e3; background: #f0f7ff; }
+
+.opt-checks { display: flex; gap: 16px; }
+.opt-checks label { font-size: 12px; display: flex; align-items: center; gap: 4px; cursor: pointer; }
+
+.opt-ranges { display: flex; gap: 12px; }
+.opt-range { flex: 1; }
+.opt-range label { font-size: 11px; color: #6e6e73; display: block; margin-bottom: 2px; }
+.opt-range input[type="range"] { width: 100%; }
+.opt-range .range-val { font-size: 11px; color: #0071e3; font-weight: 600; text-align: right; }
+
+.results { flex: 1; overflow-y: auto; padding: 8px; }
+
+/* 경로 카드 */
+.route-card { background: #fff; border: 2px solid #e5e5e7; border-radius: 12px;
+              padding: 14px; margin-bottom: 8px; cursor: pointer; transition: all 0.15s; }
+.route-card:hover { border-color: #0071e3; }
+.route-card.active { border-color: #0071e3; background: #f0f7ff; }
+.route-card .route-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.route-card .route-num { font-size: 12px; font-weight: 700; color: #0071e3; }
+.route-card .route-label { font-size: 13px; font-weight: 600; color: #1d1d1f; flex: 1; margin-left: 8px;
+                            white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* score 뱃지 — 낮을수록 좋음을 색상으로 표현 */
+.route-card .route-score { font-size: 11px; padding: 2px 8px; border-radius: 10px; font-weight: 600; white-space: nowrap; }
+.score-best { background: #e8f5e9; color: #2e7d32; }
+.score-good { background: #fff8e1; color: #f57f17; }
+.score-fair { background: #fce4ec; color: #c62828; }
+
+.route-card .route-stats { display: flex; gap: 12px; font-size: 13px; }
+.route-card .stat { display: flex; flex-direction: column; align-items: center; }
+.route-card .stat-value { font-weight: 700; font-size: 16px; }
+.route-card .stat-label { font-size: 10px; color: #86868b; margin-top: 2px; }
+
+.route-card .route-meta { font-size: 11px; color: #86868b; margin-top: 6px; }
+
+/* 경로 상세 */
+.route-detail { display: none; margin-top: 8px; padding-top: 8px; border-top: 1px solid #e5e5e7; }
+.route-card.active .route-detail { display: block; }
+.leg-item { display: flex; align-items: flex-start; padding: 4px 0; font-size: 12px; }
+.leg-icon { width: 24px; height: 24px; border-radius: 6px; display: flex; align-items: center;
+            justify-content: center; font-size: 10px; font-weight: 700; color: #fff; margin-right: 8px;
+            flex-shrink: 0; }
+.leg-icon.walk { background: #86868b; }
+.leg-icon.taxi { background: #ff9500; }
+.leg-icon.bus { background: #34c759; }
+.leg-icon.subway { background: #5856d6; }
+.leg-icon.train { background: #ff2d55; }
+.leg-icon.express_bus { background: #007aff; }
+.leg-icon.intercity_bus { background: #5ac8fa; }
+.leg-info { flex: 1; }
+.leg-info .leg-name { font-weight: 600; }
+.leg-info .leg-desc { color: #86868b; }
+
+/* 비교 테이블 — 지도 위 오버레이 */
+.compare-panel { position: absolute; top: 12px; left: 12px; right: 12px;
+                 background: rgba(255,255,255,0.97); border-radius: 12px;
+                 box-shadow: 0 4px 20px rgba(0,0,0,0.15); z-index: 1000;
+                 display: none; max-height: 50vh; overflow: auto; }
+.compare-panel.show { display: block; }
+.compare-header { display: flex; justify-content: space-between; align-items: center;
+                  padding: 12px 16px; border-bottom: 1px solid #e5e5e7; }
+.compare-header h3 { font-size: 14px; font-weight: 600; }
+.compare-close { background: none; border: none; font-size: 18px; cursor: pointer; color: #86868b;
+                 padding: 4px 8px; border-radius: 6px; }
+.compare-close:hover { background: #f0f0f0; }
+.compare-table { width: 100%; font-size: 12px; border-collapse: collapse; }
+.compare-table th { position: sticky; top: 0; background: #f5f5f7; padding: 8px 12px; text-align: center;
+                     font-weight: 600; border-bottom: 1px solid #d2d2d7; }
+.compare-table td { padding: 8px 12px; text-align: center; border-bottom: 1px solid #f0f0f0; }
+.compare-table td.best-val { color: #0071e3; font-weight: 700; }
+.compare-table td.label-cell { text-align: left; font-weight: 600; color: #6e6e73; white-space: nowrap; }
+.compare-table tbody tr:hover { background: #f9f9fb; }
+.compare-table th.route-col { cursor: pointer; }
+.compare-table th.route-col:hover { color: #0071e3; }
+
+/* 비교 버튼 (패널 하단) */
+.compare-toggle { padding: 8px 16px; border-top: 1px solid #e5e5e7; }
+.compare-toggle button { width: 100%; padding: 8px; background: #f5f5f7; border: 1px solid #d2d2d7;
+                          border-radius: 8px; font-size: 12px; cursor: pointer; }
+.compare-toggle button:hover { background: #e8e8ed; }
+
+/* 오른쪽 지도 */
+.map-area { flex: 1; position: relative; }
+#map { width: 100%; height: 100%; }
+
+.loading { display: none; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+           background: rgba(0,0,0,0.7); color: #fff; padding: 16px 32px; border-radius: 12px;
+           font-size: 14px; z-index: 1000; }
+.loading.show { display: block; }
+
+/* 지도 범례 */
+.legend { position: absolute; bottom: 20px; right: 20px; background: #fff; padding: 10px 14px;
+          border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); z-index: 1000; font-size: 11px; }
+.legend-item { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.legend-item:last-child { margin-bottom: 0; }
+.legend-color { width: 20px; height: 4px; border-radius: 2px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>혼합 경로 탐색 (택시 + 대중교통)</h1>
+</div>
+
+<div class="container">
+  <div class="panel">
+    <div class="search-form">
+      <label>출발지</label>
+      <input id="origin" type="text" placeholder="장소명 또는 위도,경도" value="화신로 298">
+      <label>도착지</label>
+      <input id="dest" type="text" placeholder="장소명 또는 위도,경도" value="복토원 양꼬치">
+
+      <div class="options-toggle" onclick="toggleOptions()">
+        <span id="optArrow">&#9654;</span> 탐색 옵션
+      </div>
+
+      <div class="options-panel" id="optionsPanel">
+        <div class="opt-group">
+          <div class="opt-label">우선순위</div>
+          <div class="opt-radios">
+            <label><input type="radio" name="priority" value="balanced" checked><span>균형</span></label>
+            <label><input type="radio" name="priority" value="low_cost"><span>저비용</span></label>
+            <label><input type="radio" name="priority" value="low_transfer"><span>적은환승</span></label>
+            <label><input type="radio" name="priority" value="low_fatigue"><span>낮은피로</span></label>
+          </div>
+        </div>
+        <div class="opt-group">
+          <div class="opt-label">허용 수단</div>
+          <div class="opt-checks">
+            <label><input type="checkbox" id="allowWalk" checked> 도보 구간</label>
+            <label><input type="checkbox" id="allowTaxi" checked> 택시 구간</label>
+          </div>
+        </div>
+        <div class="opt-group">
+          <div class="opt-label">최대 허용 거리</div>
+          <div class="opt-ranges">
+            <div class="opt-range">
+              <label>도보 <span class="range-val" id="walkVal">1.5km</span></label>
+              <input type="range" id="maxWalk" min="500" max="3000" step="100" value="1500"
+                     oninput="document.getElementById('walkVal').textContent=(this.value/1000).toFixed(1)+'km'">
+            </div>
+            <div class="opt-range">
+              <label>택시 <span class="range-val" id="taxiVal">7.0km</span></label>
+              <input type="range" id="maxTaxi" min="2000" max="15000" step="500" value="7000"
+                     oninput="document.getElementById('taxiVal').textContent=(this.value/1000).toFixed(1)+'km'">
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <button id="searchBtn" onclick="doSearch()">경로 탐색</button>
+    </div>
+    <div class="results" id="results"></div>
+    <div class="compare-toggle">
+      <button onclick="toggleCompare()">경로 비교 테이블</button>
+    </div>
+  </div>
+
+  <div class="map-area">
+    <div id="map"></div>
+    <div class="loading" id="loading">경로 탐색 중...</div>
+
+    <!-- 비교 테이블 (지도 위 오버레이) -->
+    <div class="compare-panel" id="comparePanel">
+      <div class="compare-header">
+        <h3>경로 비교</h3>
+        <button class="compare-close" onclick="toggleCompare()">&times;</button>
+      </div>
+      <table class="compare-table" id="compareTable"></table>
+    </div>
+
+    <div class="legend">
+      <div class="legend-item"><div class="legend-color" style="background:#ff9500"></div> 택시</div>
+      <div class="legend-item"><div class="legend-color" style="background:#34c759"></div> 버스</div>
+      <div class="legend-item"><div class="legend-color" style="background:#5856d6"></div> 지하철</div>
+      <div class="legend-item"><div class="legend-color" style="background:#007aff"></div> 고속버스</div>
+      <div class="legend-item"><div class="legend-color" style="background:#5ac8fa"></div> 시외버스</div>
+      <div class="legend-item"><div class="legend-color" style="background:#86868b;height:2px;border-style:dashed"></div> 도보</div>
+    </div>
+  </div>
+</div>
+
+<script>
+const MODE_COLORS = {
+  taxi: '#ff9500',
+  bus: '#34c759',
+  subway: '#5856d6',
+  train: '#ff2d55',
+  express_bus: '#007aff',
+  intercity_bus: '#5ac8fa',
+  walk: '#86868b',
+};
+const MODE_LABELS = { taxi: '택시', bus: '버스', subway: '지하철', train: '열차', express_bus: '고속버스', intercity_bus: '시외버스', walk: '도보' };
+
+let map, routeData = [], activeLayers = [], activeIdx = -1;
+
+// 지도 초기화
+map = L.map('map').setView([37.58, 126.77], 11);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '&copy; OpenStreetMap',
+  maxZoom: 18,
+}).addTo(map);
+
+// 옵션 패널 토글
+function toggleOptions() {
+  const panel = document.getElementById('optionsPanel');
+  const arrow = document.getElementById('optArrow');
+  panel.classList.toggle('show');
+  arrow.innerHTML = panel.classList.contains('show') ? '&#9660;' : '&#9654;';
+}
+
+// 카카오 키워드 → 좌표 변환 (서버 프록시)
+async function geocode(query) {
+  // 위도,경도 직접 입력
+  const parts = query.split(',');
+  if (parts.length === 2) {
+    const a = parseFloat(parts[0].trim()), b = parseFloat(parts[1].trim());
+    if (!isNaN(a) && !isNaN(b) && Math.abs(a) <= 90) return { lat: a, lng: b };
+  }
+  // 서버 프록시로 geocode
+  const url = new URL('/api/geocode', window.location.origin);
+  url.searchParams.set('q', query);
+  const resp = await fetch(url.toString());
+  if (!resp.ok) throw new Error('장소를 찾을 수 없습니다: ' + query);
+  const results = await resp.json();
+  if (!results.length) throw new Error('장소를 찾을 수 없습니다: ' + query);
+  return results[0];
+}
+
+function getOptions() {
+  return {
+    priority: document.querySelector('input[name="priority"]:checked').value,
+    allow_walk: document.getElementById('allowWalk').checked,
+    allow_taxi: document.getElementById('allowTaxi').checked,
+    max_walk_m: parseInt(document.getElementById('maxWalk').value),
+    max_taxi_m: parseInt(document.getElementById('maxTaxi').value),
+  };
+}
+
+async function doSearch() {
+  const btn = document.getElementById('searchBtn');
+  const loading = document.getElementById('loading');
+  btn.disabled = true;
+  loading.classList.add('show');
+
+  try {
+    const originQ = document.getElementById('origin').value.trim();
+    const destQ = document.getElementById('dest').value.trim();
+    if (!originQ || !destQ) { alert('출발지와 도착지를 입력하세요.'); return; }
+
+    const [org, dst] = await Promise.all([geocode(originQ), geocode(destQ)]);
+    const opts = getOptions();
+
+    const resp = await fetch('/api/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        origin_lat: org.lat, origin_lng: org.lng,
+        dest_lat: dst.lat, dest_lng: dst.lng,
+        ...opts,
+      }),
+    });
+    if (!resp.ok) { const e = await resp.json(); throw new Error(e.detail || '탐색 실패'); }
+    const data = await resp.json();
+    routeData = data.routes;
+    renderResults();
+    renderCompareTable();
+    if (routeData.length > 0) showRouteOnMap(0);
+  } catch (e) {
+    alert(e.message);
+  } finally {
+    btn.disabled = false;
+    loading.classList.remove('show');
+  }
+}
+
+// score 등급 분류 (낮을수록 좋음)
+function scoreClass(score, allScores) {
+  const min = Math.min(...allScores);
+  const max = Math.max(...allScores);
+  const range = max - min || 1;
+  const ratio = (score - min) / range;
+  if (ratio <= 0.33) return 'score-best';
+  if (ratio <= 0.66) return 'score-good';
+  return 'score-fair';
+}
+
+function scoreLabel(score, rank, total) {
+  if (rank === 0) return '최적';
+  if (rank < total * 0.33) return '양호';
+  return '';
+}
+
+function renderResults() {
+  const el = document.getElementById('results');
+  if (!routeData.length) { el.innerHTML = '<p style="padding:16px;color:#86868b">경로를 찾을 수 없습니다.</p>'; return; }
+
+  // score 기준 순위 계산
+  const allScores = routeData.map(r => r.score);
+  const sorted = [...allScores].sort((a, b) => a - b);
+
+  el.innerHTML = routeData.map((r, i) => {
+    const rank = sorted.indexOf(r.score);
+    const cls = scoreClass(r.score, allScores);
+    const badge = rank === 0 ? '최적' : `${rank + 1}위`;
+    return `
+    <div class="route-card" id="card-${i}" onclick="showRouteOnMap(${i})">
+      <div class="route-header">
+        <span class="route-num">${i + 1}</span>
+        <span class="route-label" title="${r.label}">${r.label}</span>
+        <span class="route-score ${cls}">${badge} (${r.score})</span>
+      </div>
+      <div class="route-stats">
+        <div class="stat"><span class="stat-value">${r.total_time_min}분</span><span class="stat-label">소요시간</span></div>
+        <div class="stat"><span class="stat-value">${r.total_cost_won.toLocaleString()}원</span><span class="stat-label">비용</span></div>
+        <div class="stat"><span class="stat-value">${r.transfer_count}회</span><span class="stat-label">환승</span></div>
+        <div class="stat"><span class="stat-value">${r.fatigue}</span><span class="stat-label">피로도</span></div>
+      </div>
+      <div class="route-meta">
+        도보 ${r.walk_time_min}분${r.taxi_cost_won > 0 ? ' · 택시비 ' + r.taxi_cost_won.toLocaleString() + '원' : ''}${r.expected_wait_min > 0 ? ' · 예상대기 ~' + r.expected_wait_min + '분' : ''}
+      </div>
+      <div class="route-detail">${renderLegs(r.legs)}</div>
+    </div>`;
+  }).join('');
+}
+
+function renderLegs(legs) {
+  return legs.map(l => {
+    const icon = MODE_LABELS[l.mode] ? MODE_LABELS[l.mode][0] : '?';
+    let desc = '';
+    if (l.mode === 'walk') {
+      desc = `${Math.round(l.duration_min)}분 ${Math.round(l.distance_m)}m`;
+    } else if (l.mode === 'taxi') {
+      desc = `${Math.round(l.duration_min)}분 ${(l.distance_m/1000).toFixed(1)}km ${l.cost_won.toLocaleString()}원`;
+    } else {
+      desc = `${Math.round(l.duration_min)}분${l.interval_min > 0 ? ' 배차 ' + l.interval_min + '분' : ''}`;
+    }
+    return `<div class="leg-item">
+      <div class="leg-icon ${l.mode}">${icon}</div>
+      <div class="leg-info">
+        <span class="leg-name">${l.mode !== 'walk' && l.mode !== 'taxi' ? l.detail + ': ' : ''}${l.start_name} → ${l.end_name}</span>
+        <span class="leg-desc"> (${desc})</span>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function showRouteOnMap(idx) {
+  // 카드 활성화
+  document.querySelectorAll('.route-card').forEach((c, i) => {
+    c.classList.toggle('active', i === idx);
+  });
+  activeIdx = idx;
+
+  // 기존 레이어 제거
+  activeLayers.forEach(l => map.removeLayer(l));
+  activeLayers = [];
+
+  const route = routeData[idx];
+  if (!route || !route.legs || !route.legs.length) return;
+
+  const allPoints = [];
+
+  route.legs.forEach(leg => {
+    const start = [leg.start_lat, leg.start_lng];
+    const end = [leg.end_lat, leg.end_lng];
+    allPoints.push(start, end);
+
+    const color = MODE_COLORS[leg.mode] || '#999';
+    const opts = {
+      color,
+      weight: leg.mode === 'walk' ? 3 : 5,
+      opacity: 0.85,
+      dashArray: leg.mode === 'walk' ? '6 8' : null,
+    };
+
+    const line = L.polyline([start, end], opts).addTo(map);
+    activeLayers.push(line);
+
+    // 역 마커 (도보 제외)
+    if (leg.mode !== 'walk') {
+      const startMarker = L.circleMarker(start, {
+        radius: 5, fillColor: color, color: '#fff', weight: 2, fillOpacity: 1,
+      }).bindTooltip(leg.start_name, { direction: 'top', offset: [0, -8] }).addTo(map);
+      activeLayers.push(startMarker);
+    }
+  });
+
+  // 출발/도착 마커
+  const first = route.legs[0];
+  const last = route.legs[route.legs.length - 1];
+
+  const startIcon = L.divIcon({
+    html: '<div style="background:#0071e3;color:#fff;width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.3)">출</div>',
+    iconSize: [28, 28], iconAnchor: [14, 14], className: '',
+  });
+  const endIcon = L.divIcon({
+    html: '<div style="background:#ff3b30;color:#fff;width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.3)">도</div>',
+    iconSize: [28, 28], iconAnchor: [14, 14], className: '',
+  });
+
+  activeLayers.push(L.marker([first.start_lat, first.start_lng], { icon: startIcon }).addTo(map));
+  activeLayers.push(L.marker([last.end_lat, last.end_lng], { icon: endIcon }).addTo(map));
+
+  // 맵 영역 맞추기
+  if (allPoints.length > 0) {
+    map.fitBounds(L.latLngBounds(allPoints).pad(0.1));
+  }
+}
+
+function renderCompareTable() {
+  if (!routeData.length) return;
+  const fields = [
+    { key: 'total_time_min', label: '소요시간', unit: '분', fmt: v => v + '분', low: true },
+    { key: 'total_cost_won', label: '총 비용', unit: '원', fmt: v => v.toLocaleString() + '원', low: true },
+    { key: 'transfer_count', label: '환승', unit: '회', fmt: v => v + '회', low: true },
+    { key: 'walk_time_min', label: '도보 시간', unit: '분', fmt: v => v + '분', low: true },
+    { key: 'taxi_cost_won', label: '택시비', unit: '원', fmt: v => v.toLocaleString() + '원', low: true },
+    { key: 'expected_wait_min', label: '예상대기', unit: '분', fmt: v => '~' + v + '분', low: true },
+    { key: 'fatigue', label: '피로도', unit: '', fmt: v => v, low: true },
+    { key: 'score', label: '종합점수', unit: '', fmt: v => v, low: true },
+  ];
+
+  // 각 필드 최솟값 찾기
+  const mins = {};
+  fields.forEach(f => { mins[f.key] = Math.min(...routeData.map(r => r[f.key])); });
+
+  let html = '<thead><tr><th></th>';
+  routeData.forEach((r, i) => {
+    const short = r.label.length > 12 ? r.label.substring(0, 12) + '...' : r.label;
+    html += `<th class="route-col" onclick="showRouteOnMap(${i})" title="${r.label}">경로 ${i + 1}<br><span style="font-size:10px;font-weight:400;color:#86868b">${short}</span></th>`;
+  });
+  html += '</tr></thead><tbody>';
+
+  fields.forEach(f => {
+    html += `<tr><td class="label-cell">${f.label}</td>`;
+    routeData.forEach(r => {
+      const isBest = r[f.key] === mins[f.key] && routeData.filter(x => x[f.key] === mins[f.key]).length < routeData.length;
+      html += `<td${isBest ? ' class="best-val"' : ''}>${f.fmt(r[f.key])}</td>`;
+    });
+    html += '</tr>';
+  });
+
+  // 구성 요약 행
+  html += '<tr><td class="label-cell">구성</td>';
+  routeData.forEach(r => {
+    const modes = r.legs.map(l => MODE_LABELS[l.mode] || l.mode);
+    const unique = [...new Set(modes)];
+    html += `<td style="font-size:11px">${unique.join('+')}</td>`;
+  });
+  html += '</tr>';
+
+  html += '</tbody>';
+  document.getElementById('compareTable').innerHTML = html;
+}
+
+function toggleCompare() {
+  document.getElementById('comparePanel').classList.toggle('show');
+}
+</script>
+</body>
+</html>
