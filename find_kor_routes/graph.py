@@ -292,13 +292,13 @@ class RouteGraph:
                 from_name="출발지", to_name="도착지",
             ))
 
-        # 역 ↔ 역 (다른 노선, 1~5km)
+        # 역 ↔ 역 (다른 노선, 1~15km: 중간 환승 택시 지원)
         for i, n1 in enumerate(stations):
             for n2 in stations[i + 1:]:
                 if n1.line_name == n2.line_name:
                     continue
                 d = haversine_m(n1.coord, n2.coord)
-                if 1000 < d <= 5000:
+                if 1000 < d <= 15000:
                     t, c = estimate_taxi(d)
                     for a, b in [(n1, n2), (n2, n1)]:
                         self.add_edge(GraphEdge(
@@ -429,7 +429,75 @@ class RouteGraph:
                     continue
                 _add([entry] + transit_path + [exit_e])
 
+        # S5: 대중교통→택시→대중교통 (중간 환승 택시 치환)
+        # 전체 Dijkstra(택시 허용)로 중간에 택시가 개입하는 경로를 발견한다.
+        # 예: 기차→택시→버스, 지하철→택시→지하철 등
+        full_path = self._dijkstra("origin", "dest", allow_taxi=True)
+        if full_path:
+            # 중간 택시 패턴: 택시 앞뒤로 대중교통이 있는지 확인
+            has_mid_taxi = self._has_mid_taxi(full_path)
+            if has_mid_taxi:
+                _add(full_path)
+
+        # S5-b: S1 기반 중간 환승 지점에서 택시 치환 시도
+        s1_path = self._dijkstra("origin", "dest", allow_taxi=False)
+        if s1_path:
+            # 환승 지점(대중교통A 끝 → 도보 → 대중교통B 시작) 식별
+            transfer_points = self._find_transfer_points(s1_path)
+            for tp_from, tp_to in transfer_points:
+                # 환승 지점에서 택시로 다른 노선 역까지 갈 수 있는지 탐색
+                # tp_from 주변 역 → tp_to 주변 역 사이에 택시 엣지가 있으면
+                # tp_from → (택시허용) → tp_to 구간만 재탐색
+                mid_path = self._dijkstra(tp_from, tp_to, allow_taxi=True)
+                if mid_path and any(e.mode == TransportMode.TAXI for e in mid_path):
+                    # 앞 구간 (origin → tp_from, 대중교통)
+                    before = self._dijkstra("origin", tp_from, allow_taxi=False)
+                    # 뒤 구간 (tp_to → dest, 대중교통)
+                    after = self._dijkstra(tp_to, "dest", allow_taxi=False)
+                    if before is not None and after is not None:
+                        _add(before + mid_path + after)
+
         return results
+
+    def _find_transfer_points(self, path: list[GraphEdge]) -> list[tuple[str, str]]:
+        """경로에서 환승 지점(대중교통 A 끝 → 대중교통 B 시작)을 식별.
+
+        Returns: [(A의 마지막 역 ID, B의 첫 역 ID), ...]
+        """
+        transfers: list[tuple[str, str]] = []
+        i = 0
+        while i < len(path):
+            edge = path[i]
+            if edge.mode.is_transit:
+                # 현재 대중교통 구간의 끝을 찾음
+                current_line = edge.detail
+                last_id = edge.to_id
+                j = i + 1
+                while j < len(path) and path[j].mode.is_transit and path[j].detail == current_line:
+                    last_id = path[j].to_id
+                    j += 1
+                # 도보/환승을 건너뛴 후 다음 대중교통 구간의 시작을 찾음
+                k = j
+                while k < len(path) and path[k].mode == TransportMode.WALK:
+                    k += 1
+                if k < len(path) and path[k].mode.is_transit and path[k].detail != current_line:
+                    transfers.append((last_id, path[k].from_id))
+                i = j
+            else:
+                i += 1
+        return transfers
+
+    @staticmethod
+    def _has_mid_taxi(path: list[GraphEdge]) -> bool:
+        """택시가 경로 중간에 있는지 확인 (앞뒤로 대중교통 존재)."""
+        for i, edge in enumerate(path):
+            if edge.mode != TransportMode.TAXI:
+                continue
+            has_transit_before = any(e.mode.is_transit for e in path[:i])
+            has_transit_after = any(e.mode.is_transit for e in path[i + 1:])
+            if has_transit_before and has_transit_after:
+                return True
+        return False
 
     def _reachable_lines(self, node_id: str) -> set[str]:
         """해당 노드에서 도보로 접근 가능한 대중교통 노선명 집합."""

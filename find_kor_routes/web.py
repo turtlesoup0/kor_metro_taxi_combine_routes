@@ -62,10 +62,14 @@ class RouteResponse(BaseModel):
     fatigue: float
     score: float
     legs: list[LegResponse]
+    # 택시 비용-편익 분석 (택시 포함 경로만)
+    taxi_time_saved_min: float = 0.0   # 기준 대중교통 대비 절약 시간
+    taxi_cost_per_min: float = 0.0     # 절약 분당 택시 비용 (원/분)
 
 
 class SearchResponse(BaseModel):
     routes: list[RouteResponse]
+    reference_transit_time_min: float = 0.0  # 기준 대중교통 시간 (비교용)
 
 
 # ── API 엔드포인트 ──
@@ -99,6 +103,18 @@ async def search_routes(req: SearchRequest):
     )
 
     w = config.weights
+
+    # 기준 대중교통 시간 (택시 비용-편익 분석용)
+    from .models import TransportMode as TM
+    transit_only_routes = [r for r in routes
+                           if all(l.mode != TM.TAXI for l in r.legs)]
+    if transit_only_routes:
+        best_transit_time = min(r.total_time_min for r in transit_only_routes)
+    else:
+        # 순수 대중교통 없으면 택시비 가장 적은 경로를 기준으로
+        sorted_by_taxi = sorted(routes, key=lambda r: r.taxi_cost_won)
+        best_transit_time = sorted_by_taxi[0].total_time_min if sorted_by_taxi else None
+
     result = []
     for route in routes:
         legs = []
@@ -114,6 +130,15 @@ async def search_routes(req: SearchRequest):
                 detail=leg.detail,
                 interval_min=leg.interval_min,
             ))
+
+        # 택시 비용-편익 분석
+        taxi_saved = 0.0
+        taxi_cpm = 0.0
+        if route.taxi_cost_won > 0 and best_transit_time is not None:
+            taxi_saved = best_transit_time - route.total_time_min
+            if taxi_saved > 0:
+                taxi_cpm = round(route.taxi_cost_won / taxi_saved)
+
         result.append(RouteResponse(
             label=route.label,
             total_time_min=round(route.total_time_min, 0),
@@ -126,9 +151,14 @@ async def search_routes(req: SearchRequest):
             score=round(route.score(w.time, w.cost, w.transfers,
                                      w.walking, w.wait, w.fatigue), 1),
             legs=legs,
+            taxi_time_saved_min=round(taxi_saved, 0),
+            taxi_cost_per_min=taxi_cpm,
         ))
 
-    return SearchResponse(routes=result)
+    return SearchResponse(
+        routes=result,
+        reference_transit_time_min=round(best_transit_time or 0, 0),
+    )
 
 
 # ── 지오코딩 (카카오 키워드 검색 프록시) ──

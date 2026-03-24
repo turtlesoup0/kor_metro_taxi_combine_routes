@@ -15,6 +15,7 @@ from .config import Config
 from .constants import (
     FIRST_LAST_MILE_THRESHOLD_M,
     INCOMPLETE_ROUTE_THRESHOLD_M,
+    INTERVAL_HIGH_THRESHOLD,
     LONG_DISTANCE_THRESHOLD_M,
     MAX_TAXI_ONLY_KM,
     ROAD_DISTANCE_FACTOR,
@@ -98,6 +99,9 @@ class HybridRouter:
             origin, dest, fetch, graph, paths, w,
             allow_taxi,
         )
+
+        # ── 4.5단계: 고배차 버스 택시 대체 변형 생성 ──
+        routes.extend(self._replace_high_interval_legs(routes))
 
         result = self._rank_and_filter(routes)
         await close_client()
@@ -386,7 +390,7 @@ class HybridRouter:
                 mode_sig = "+".join(sorted(set(
                     l.mode.value for l in br.legs if l.mode != TransportMode.WALK)))
                 if mode_sig not in type_seen:
-                    br.label = "대중교통"
+                    br.label = _auto_route_label(br)
                     routes.append(br)
                     type_seen[mode_sig] = br.score(
                         w.time, w.cost, w.transfers, w.walking, w.wait, w.fatigue)
@@ -629,6 +633,38 @@ class HybridRouter:
         )
 
     # ═══════════════════════════════════════════════════
+    #  고배차 버스 택시 대체
+    # ═══════════════════════════════════════════════════
+
+    @staticmethod
+    def _replace_high_interval_legs(routes: list[Route]) -> list[Route]:
+        """배차간격 30분+ 버스 구간을 택시로 대체한 변형 경로를 생성."""
+        variants: list[Route] = []
+        for route in routes:
+            for idx, leg in enumerate(route.legs):
+                if not leg.mode.is_bus_like:
+                    continue
+                if leg.interval_min < INTERVAL_HIGH_THRESHOLD:
+                    continue
+                # 해당 구간을 택시로 대체
+                dist = haversine_m(leg.start, leg.end)
+                taxi_time, taxi_cost = estimate_taxi(dist)
+                taxi_leg = RouteLeg(
+                    mode=TransportMode.TAXI,
+                    start=leg.start, end=leg.end,
+                    start_name=leg.start_name, end_name=leg.end_name,
+                    duration_min=taxi_time,
+                    distance_m=dist * ROAD_DISTANCE_FACTOR,
+                    cost_won=taxi_cost,
+                    detail="택시",
+                    interval_min=0.0,
+                )
+                new_legs = route.legs[:idx] + [taxi_leg] + route.legs[idx + 1:]
+                label = _auto_route_label(Route(legs=new_legs))
+                variants.append(Route(legs=new_legs, label=label))
+        return variants
+
+    # ═══════════════════════════════════════════════════
     #  스코어 정렬 + 필터링
     # ═══════════════════════════════════════════════════
 
@@ -813,6 +849,20 @@ def _collect_hubs(terminals, stations, max_terminals: int = 3, max_stations: int
     return hubs
 
 
+def _auto_route_label(r: Route) -> str:
+    """경로 구간 정보로 라벨 자동 생성."""
+    parts: list[str] = []
+    for leg in r.legs:
+        if leg.mode == TransportMode.WALK:
+            continue
+        if leg.mode == TransportMode.TAXI:
+            km = leg.distance_m / 1000
+            parts.append(f"택시({km:.1f}km)")
+        else:
+            parts.append(leg.detail)
+    return "→".join(parts) if parts else "대중교통"
+
+
 def _route_type(r: Route) -> str:
     """경로를 패턴 유형으로 분류."""
     modes = [l.mode for l in r.legs if l.mode != TransportMode.WALK]
@@ -835,4 +885,15 @@ def _route_type(r: Route) -> str:
         return "taxi-transit"
     if has_taxi_end:
         return "transit-taxi"
+
+    # 중간 택시 (대중교통→택시→대중교통)
+    has_mid_taxi = any(
+        modes[i] == TransportMode.TAXI
+        and any(m != TransportMode.TAXI for m in modes[:i])
+        and any(m != TransportMode.TAXI for m in modes[i + 1:])
+        for i in range(len(modes))
+    )
+    if has_mid_taxi:
+        return "transit-taxi-transit"
+
     return "transit"

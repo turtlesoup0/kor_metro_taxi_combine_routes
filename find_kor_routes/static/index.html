@@ -241,7 +241,7 @@ const MODE_COLORS = {
 };
 const MODE_LABELS = { taxi: '택시', bus: '버스', subway: '지하철', train: '열차', express_bus: '고속버스', intercity_bus: '시외버스', walk: '도보' };
 
-let map, routeData = [], activeLayers = [], activeIdx = -1;
+let map, routeData = [], activeLayers = [], activeIdx = -1, referenceTransitTime = 0;
 
 // 지도 초기화
 map = L.map('map').setView([37.58, 126.77], 11);
@@ -312,6 +312,7 @@ async function doSearch() {
     if (!resp.ok) { const e = await resp.json(); throw new Error(e.detail || '탐색 실패'); }
     const data = await resp.json();
     routeData = data.routes;
+    referenceTransitTime = data.reference_transit_time_min || 0;
     renderResults();
     renderCompareTable();
     if (routeData.length > 0) showRouteOnMap(0);
@@ -368,6 +369,26 @@ function renderResults() {
       <div class="route-meta">
         도보 ${r.walk_time_min}분${r.taxi_cost_won > 0 ? ' · 택시비 ' + r.taxi_cost_won.toLocaleString() + '원' : ''}${r.expected_wait_min > 0 ? ' · 예상대기 ~' + r.expected_wait_min + '분' : ''}
       </div>
+      ${r.taxi_cost_won > 0 && r.taxi_time_saved_min > 0 ? `<div class="route-savings" style="background:#f0fdf4;border-radius:6px;padding:6px 10px;margin-top:6px;font-size:12px;">
+        <div style="color:#16a34a;font-weight:600;margin-bottom:2px;">
+          택시 ${r.taxi_cost_won.toLocaleString()}원 → ${r.taxi_time_saved_min}분 절약
+          ${r.taxi_cost_per_min > 0 ? `<span style="color:#666;font-weight:400;">(${r.taxi_cost_per_min.toLocaleString()}원/분)</span>` : ''}
+        </div>
+        ${referenceTransitTime > 0 ? `<div style="display:flex;align-items:center;gap:6px;margin-top:4px;">
+          <span style="color:#888;font-size:11px;min-width:55px;">대중교통</span>
+          <div style="flex:1;background:#e5e7eb;border-radius:3px;height:6px;overflow:hidden;">
+            <div style="width:100%;height:100%;background:#9ca3af;border-radius:3px;"></div>
+          </div>
+          <span style="color:#888;font-size:11px;">${referenceTransitTime}분</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;margin-top:2px;">
+          <span style="color:#16a34a;font-size:11px;min-width:55px;">이 경로</span>
+          <div style="flex:1;background:#e5e7eb;border-radius:3px;height:6px;overflow:hidden;">
+            <div style="width:${Math.min(100, (r.total_time_min / referenceTransitTime) * 100)}%;height:100%;background:#16a34a;border-radius:3px;"></div>
+          </div>
+          <span style="color:#16a34a;font-size:11px;">${r.total_time_min}분</span>
+        </div>` : ''}
+      </div>` : ''}
       <div class="route-detail">${renderLegs(r.legs)}</div>
     </div>`;
   }).join('');
