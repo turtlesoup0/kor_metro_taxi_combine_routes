@@ -691,6 +691,24 @@ class HybridRouter:
 
         filtered: list[Route] = []
         for r in routes:
+            # 불연속 경로 제거 (leg 끝 좌표 ≠ 다음 leg 시작 좌표, 3km+ 갭)
+            if _has_gap(r):
+                continue
+
+            # 전구간 택시: 다구간 분할 택시 제거 (단일 구간 택시 직행은 유지)
+            modes = [l.mode for l in r.legs if l.mode != TransportMode.WALK]
+            if modes and all(m == TransportMode.TAXI for m in modes):
+                taxi_legs_only = [l for l in r.legs if l.mode == TransportMode.TAXI]
+                if len(taxi_legs_only) > 1:
+                    continue
+
+            # 개별 택시 구간이 30km 초과하면 비합리적 (first/last mile 제외)
+            taxi_legs = [l for l in r.legs if l.mode == TransportMode.TAXI]
+            if len(taxi_legs) > 0 and any(l.mode.is_transit for l in r.legs):
+                max_taxi_km = max(l.distance_m / 1000 for l in taxi_legs)
+                if max_taxi_km > 30:
+                    continue
+
             transit_legs = [l for l in r.legs if l.mode.is_transit]
             if max(0, len(transit_legs) - 1) > 4:
                 continue
@@ -742,20 +760,22 @@ class HybridRouter:
                 parts.append(f"{l.mode.value}:{l.detail}")
             return "|".join(parts)
 
+        # 유형별 최선을 반드시 포함하되, 전체 스코어 순으로 정렬
+        must_include: set[int] = set()
         for r in type_best.values():
-            sig = route_sig(r)
-            if sig not in seen_sigs:
-                result.append(r)
-                seen_sigs.add(sig)
+            must_include.add(id(r))
 
         for r in scored:
             sig = route_sig(r)
-            if sig not in seen_sigs:
-                result.append(r)
-                seen_sigs.add(sig)
-            if len(result) >= max_results:
+            if sig in seen_sigs:
+                continue
+            seen_sigs.add(sig)
+            result.append(r)
+            if len(result) >= max_results and id(r) not in must_include:
                 break
 
+        # 최종 스코어 순 정렬
+        result.sort(key=score)
         return result[:max_results]
 
     # ═══════════════════════════════════════════════════
@@ -847,6 +867,15 @@ def _collect_hubs(terminals, stations, max_terminals: int = 3, max_stations: int
     if not isinstance(stations, Exception) and stations:
         hubs.extend(stations[:max_stations])
     return hubs
+
+
+def _has_gap(r: Route, max_gap_m: float = 3000) -> bool:
+    """경로에 불연속 구간(leg 끝 ≠ 다음 leg 시작)이 있는지 확인."""
+    for i in range(len(r.legs) - 1):
+        gap = haversine_m(r.legs[i].end, r.legs[i + 1].start)
+        if gap > max_gap_m:
+            return True
+    return False
 
 
 def _auto_route_label(r: Route) -> str:
