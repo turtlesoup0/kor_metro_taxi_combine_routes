@@ -280,17 +280,18 @@ class RouteGraph:
                         from_name=sn.name, to_name="도착지",
                     ))
 
-        # 출발 → 도착 직행 택시
+        # 출발 → 도착 직행 택시 (max_dist_m 이내만)
         if origin and dest:
             d = haversine_m(origin.coord, dest.coord)
-            t, c = estimate_taxi(d)
-            self.add_edge(GraphEdge(
-                from_id="origin", to_id="dest",
-                mode=TransportMode.TAXI,
-                duration_min=t, cost_won=c, distance_m=d * ROAD_DISTANCE_FACTOR,
-                detail="택시", is_estimate=True,
-                from_name="출발지", to_name="도착지",
-            ))
+            if d <= max_dist_m:
+                t, c = estimate_taxi(d)
+                self.add_edge(GraphEdge(
+                    from_id="origin", to_id="dest",
+                    mode=TransportMode.TAXI,
+                    duration_min=t, cost_won=c, distance_m=d * ROAD_DISTANCE_FACTOR,
+                    detail="택시", is_estimate=True,
+                    from_name="출발지", to_name="도착지",
+                ))
 
         # 역 ↔ 역 (다른 노선, 1~15km: 중간 환승 택시 지원)
         for i, n1 in enumerate(stations):

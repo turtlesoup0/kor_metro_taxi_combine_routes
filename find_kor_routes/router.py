@@ -17,7 +17,6 @@ from .constants import (
     INCOMPLETE_ROUTE_THRESHOLD_M,
     INTERVAL_HIGH_THRESHOLD,
     LONG_DISTANCE_THRESHOLD_M,
-    MAX_TAXI_ONLY_KM,
     ROAD_DISTANCE_FACTOR,
     TAXI_COST_PER_MIN_THRESHOLD,
     TAXI_MIN_TIME_SAVE_MIN,
@@ -78,6 +77,7 @@ class HybridRouter:
         # 허브역 + 터미널 보충 검색
         await self._add_hub_edges(
             graph, origin, dest, fetch, is_long_distance, max_walk_m,
+            max_taxi_m, allow_taxi,
         )
 
         if allow_walk:
@@ -97,11 +97,15 @@ class HybridRouter:
         # ── 4단계: 경로 변환 + 조립 ──
         routes = await self._assemble_routes(
             origin, dest, fetch, graph, paths, w,
-            allow_taxi,
+            allow_taxi, max_taxi_m,
         )
 
         # ── 4.5단계: 고배차 버스 택시 대체 변형 생성 ──
-        routes.extend(self._replace_high_interval_legs(routes))
+        if allow_taxi:
+            routes.extend(self._replace_high_interval_legs(routes))
+
+        # ── 5단계: 택시 구간 대중교통 교차검증 ──
+        routes = await self._cross_validate_taxi_legs(routes, origin, dest)
 
         result = self._rank_and_filter(routes)
         await close_client()
@@ -184,6 +188,7 @@ class HybridRouter:
     async def _add_hub_edges(
         self, graph: RouteGraph, origin: Coord, dest: Coord,
         fetch: dict, is_long_distance: bool, max_walk_m: int,
+        max_taxi_m: int = 7000, allow_taxi: bool = True,
     ) -> None:
         """주변 허브역 + 터미널을 그래프에 추가하고 보충 ODsay 검색을 실행."""
         stations_origin = fetch["stations_origin"]
@@ -233,12 +238,14 @@ class HybridRouter:
         # 장거리: 터미널 허브 + 교차 검색
         if is_long_distance:
             await self._add_terminal_hub_edges(
-                graph, origin, dest, terminals_origin, terminals_dest, max_walk_m,
+                graph, origin, dest, terminals_origin, terminals_dest,
+                max_walk_m, max_taxi_m, allow_taxi,
             )
 
     async def _add_terminal_hub_edges(
         self, graph: RouteGraph, origin: Coord, dest: Coord,
         terminals_origin, terminals_dest, max_walk_m: int,
+        max_taxi_m: int = 7000, allow_taxi: bool = True,
     ) -> None:
         """장거리 터미널 노드를 그래프에 추가하고 교차 검색을 실행."""
         t_origins = ([t for t in terminals_origin[:2]]
@@ -251,14 +258,16 @@ class HybridRouter:
             tid = f"terminal_{t.name}"
             graph.add_node(GraphNode(tid, t.name, t.coord, "station", "터미널"))
             d = haversine_m(origin, t.coord)
-            time_min, cost = estimate_taxi(d)
-            graph.add_edge(GraphEdge(
-                from_id="origin", to_id=tid,
-                mode=TransportMode.TAXI,
-                duration_min=time_min, cost_won=cost,
-                distance_m=d * ROAD_DISTANCE_FACTOR, detail="택시",
-                is_estimate=True, from_name="출발지", to_name=t.name,
-            ))
+            # 택시 허용 + max_taxi_m 이내인 경우에만 택시 엣지 생성
+            if allow_taxi and d <= max_taxi_m:
+                time_min, cost = estimate_taxi(d)
+                graph.add_edge(GraphEdge(
+                    from_id="origin", to_id=tid,
+                    mode=TransportMode.TAXI,
+                    duration_min=time_min, cost_won=cost,
+                    distance_m=d * ROAD_DISTANCE_FACTOR, detail="택시",
+                    is_estimate=True, from_name="출발지", to_name=t.name,
+                ))
             if d <= max_walk_m:
                 graph.add_edge(GraphEdge(
                     from_id="origin", to_id=tid,
@@ -271,14 +280,16 @@ class HybridRouter:
             tid = f"terminal_{t.name}"
             graph.add_node(GraphNode(tid, t.name, t.coord, "station", "터미널"))
             d = haversine_m(t.coord, dest)
-            time_min, cost = estimate_taxi(d)
-            graph.add_edge(GraphEdge(
-                from_id=tid, to_id="dest",
-                mode=TransportMode.TAXI,
-                duration_min=time_min, cost_won=cost,
-                distance_m=d * ROAD_DISTANCE_FACTOR, detail="택시",
-                is_estimate=True, from_name=t.name, to_name="도착지",
-            ))
+            # 택시 허용 + max_taxi_m 이내인 경우에만 택시 엣지 생성
+            if allow_taxi and d <= max_taxi_m:
+                time_min, cost = estimate_taxi(d)
+                graph.add_edge(GraphEdge(
+                    from_id=tid, to_id="dest",
+                    mode=TransportMode.TAXI,
+                    duration_min=time_min, cost_won=cost,
+                    distance_m=d * ROAD_DISTANCE_FACTOR, detail="택시",
+                    is_estimate=True, from_name=t.name, to_name="도착지",
+                ))
             if d <= max_walk_m:
                 graph.add_edge(GraphEdge(
                     from_id=tid, to_id="dest",
@@ -358,7 +369,7 @@ class HybridRouter:
     async def _assemble_routes(
         self, origin: Coord, dest: Coord, fetch: dict,
         graph: RouteGraph, paths: list, w,
-        allow_taxi: bool,
+        allow_taxi: bool, max_taxi_m: int = 7000,
     ) -> list[Route]:
         """baseline + 그래프 + 택시직행 경로를 조립한다."""
         routes: list[Route] = []
@@ -375,12 +386,15 @@ class HybridRouter:
 
         # first-mile/last-mile 보충 (필터 전에)
         baseline_routes = await self._supplement_first_last_mile(
-            baseline_routes, origin, dest)
+            baseline_routes, origin, dest, max_taxi_m=max_taxi_m,
+            allow_taxi=allow_taxi)
 
-        # 불완전 경로 필터 (보충 후)
+        # 불완전 경로 필터 (보충 후) — 출발지·도착지 양쪽 확인
         baseline_routes = [
             br for br in baseline_routes
-            if br.legs and haversine_m(br.legs[-1].end, dest) <= INCOMPLETE_ROUTE_THRESHOLD_M
+            if br.legs
+            and haversine_m(origin, br.legs[0].start) <= INCOMPLETE_ROUTE_THRESHOLD_M
+            and haversine_m(br.legs[-1].end, dest) <= INCOMPLETE_ROUTE_THRESHOLD_M
         ]
 
         if baseline_routes:
@@ -395,16 +409,21 @@ class HybridRouter:
                     type_seen[mode_sig] = br.score(
                         w.time, w.cost, w.transfers, w.walking, w.wait, w.fatigue)
 
-        # 그래프 경로
+        # 그래프 경로 (택시 비허용 시 택시 포함 경로 제외)
         for path in paths:
             route = graph.path_to_route(path)
-            if route.legs:
-                routes.append(route)
+            if not route.legs:
+                continue
+            if not allow_taxi and any(l.mode == TransportMode.TAXI for l in route.legs):
+                continue
+            routes.append(route)
 
-        # 택시 직행
+        # 택시 직행 (max_taxi_m 기준 적용)
         if allow_taxi and not isinstance(taxi_leg, Exception):
             km = taxi_leg.distance_m / 1000
-            if km <= MAX_TAXI_ONLY_KM:
+            has_transit = any(
+                any(l.mode.is_transit for l in r.legs) for r in routes)
+            if taxi_leg.distance_m <= max_taxi_m or not has_transit:
                 routes.append(Route(
                     legs=[taxi_leg],
                     label=f"택시 ({km:.1f}km 전구간)",
@@ -429,11 +448,12 @@ class HybridRouter:
             fetch["stations_origin"], fetch["stations_dest"],
             fetch["terminals_origin"] if is_long_distance else [],
             fetch["terminals_dest"] if is_long_distance else [],
+            max_taxi_m=max_taxi_m,
         )
         if fallback:
             if allow_taxi and not isinstance(taxi_leg, Exception):
                 km = taxi_leg.distance_m / 1000
-                if km <= MAX_TAXI_ONLY_KM:
+                if taxi_leg.distance_m <= max_taxi_m:
                     fallback.append(Route(
                         legs=[taxi_leg], label=f"택시 ({km:.1f}km 전구간)"))
             result = self._rank_and_filter(fallback)
@@ -450,6 +470,7 @@ class HybridRouter:
         self, origin: Coord, dest: Coord,
         stations_origin: list, stations_dest: list,
         terminals_origin: list, terminals_dest: list,
+        max_taxi_m: int = 7000,
     ) -> list[Route]:
         """인근 거점(터미널/역) 경유 경로 탐색."""
         routes: list[Route] = []
@@ -496,7 +517,8 @@ class HybridRouter:
             routes.append(Route(legs=new_legs, label=f"택시→{hub.name}→대중교통"))
 
         if routes:
-            routes = await self._supplement_first_last_mile(routes, origin, dest)
+            routes = await self._supplement_first_last_mile(
+                routes, origin, dest, max_taxi_m=max_taxi_m)
         return routes
 
     # ═══════════════════════════════════════════════════
@@ -506,8 +528,13 @@ class HybridRouter:
     async def _supplement_first_last_mile(
         self, routes: list[Route], origin: Coord, dest: Coord,
         threshold_m: float = FIRST_LAST_MILE_THRESHOLD_M,
+        max_taxi_fallback_m: float | None = None,
+        max_taxi_m: int = 7000, allow_taxi: bool = True,
     ) -> list[Route]:
         """출발지→첫역, 끝역→도착지가 먼 경우 대중교통/택시로 보충."""
+        # max_taxi_fallback_m 미지정 시 max_taxi_m 값을 사용
+        if max_taxi_fallback_m is None:
+            max_taxi_fallback_m = max_taxi_m
         first_searches: dict[str, Coord] = {}
         last_searches: dict[str, Coord] = {}
 
@@ -576,12 +603,15 @@ class HybridRouter:
                         fm_legs.pop()
                     new_legs = fm_legs + new_legs
                 else:
+                    # ODsay 보충 실패 → 택시 fallback (택시 허용 + 거리 제한)
                     d = haversine_m(origin, ft.start)
-                    access = make_access_leg(origin, ft.start, "출발지",
-                                             ft.start_name or "터미널")
-                    while new_legs and new_legs[0].mode == TransportMode.WALK:
-                        new_legs.pop(0)
-                    new_legs.insert(0, access)
+                    if allow_taxi and d <= max_taxi_fallback_m:
+                        access = make_access_leg(origin, ft.start, "출발지",
+                                                 ft.start_name or "터미널")
+                        while new_legs and new_legs[0].mode == TransportMode.WALK:
+                            new_legs.pop(0)
+                        new_legs.insert(0, access)
+                    # 택시 비허용 또는 거리 초과 시 보충 안 함
 
             # 마지막 구간 보충
             lt = next((l for l in reversed(new_legs) if l.mode.is_transit), None)
@@ -596,11 +626,13 @@ class HybridRouter:
                         lm_legs.pop(0)
                     new_legs = new_legs + lm_legs
                 else:
-                    access = make_access_leg(lt.end, dest,
-                                             lt.end_name or "터미널", "도착지")
-                    while new_legs and new_legs[-1].mode == TransportMode.WALK:
-                        new_legs.pop()
-                    new_legs.append(access)
+                    d = haversine_m(lt.end, dest)
+                    if allow_taxi and d <= max_taxi_fallback_m:
+                        access = make_access_leg(lt.end, dest,
+                                                 lt.end_name or "터미널", "도착지")
+                        while new_legs and new_legs[-1].mode == TransportMode.WALK:
+                            new_legs.pop()
+                        new_legs.append(access)
 
             supplemented.append(Route(legs=new_legs, label=r.label))
         return supplemented
@@ -631,6 +663,77 @@ class HybridRouter:
             *[refine_one(e) for e in edges.values()],
             return_exceptions=True,
         )
+
+    # ═══════════════════════════════════════════════════
+    #  5단계: 택시 구간 대중교통 교차검증
+    # ═══════════════════════════════════════════════════
+
+    async def _cross_validate_taxi_legs(
+        self, routes: list[Route], origin: Coord, dest: Coord,
+        min_taxi_m: float = 1000,
+    ) -> list[Route]:
+        """택시 구간에 대중교통 대안이 있는지 검증하고, 있으면 대체 경로를 생성."""
+        # 교차검증할 택시 구간 수집 (중복 제거)
+        taxi_segments: dict[str, tuple[Coord, Coord, str, str]] = {}
+        for route in routes:
+            for leg in route.legs:
+                if leg.mode != TransportMode.TAXI:
+                    continue
+                if leg.distance_m < min_taxi_m:
+                    continue
+                key = f"{leg.start.lat:.4f},{leg.start.lng:.4f}|{leg.end.lat:.4f},{leg.end.lng:.4f}"
+                if key not in taxi_segments:
+                    taxi_segments[key] = (leg.start, leg.end, leg.start_name, leg.end_name)
+
+        if not taxi_segments:
+            return routes
+
+        # 택시 구간별 ODsay 검색 (병렬)
+        keys = list(taxi_segments.keys())
+        tasks = [
+            self.odsay.search_raw(seg[0], seg[1])
+            for seg in taxi_segments.values()
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # 택시 구간별 최선 대중교통 대안 파싱
+        transit_alts: dict[str, Route] = {}
+        for key, raw in zip(keys, results):
+            if isinstance(raw, Exception):
+                continue
+            parsed = self._parse_odsay_routes(
+                raw,
+                taxi_segments[key][0],
+                taxi_segments[key][1],
+            )
+            valid = [r for r in parsed if r.legs and any(l.mode.is_transit for l in r.legs)]
+            if valid:
+                best = min(valid, key=lambda r: r.total_time_min)
+                transit_alts[key] = best
+
+        if not transit_alts:
+            return routes
+
+        # 기존 경로의 택시 구간을 대중교통으로 대체한 변형 경로 생성
+        new_routes: list[Route] = list(routes)
+        for route in routes:
+            has_replacement = False
+            new_legs: list[RouteLeg] = []
+            for leg in route.legs:
+                if leg.mode == TransportMode.TAXI and leg.distance_m >= min_taxi_m:
+                    key = f"{leg.start.lat:.4f},{leg.start.lng:.4f}|{leg.end.lat:.4f},{leg.end.lng:.4f}"
+                    alt = transit_alts.get(key)
+                    if alt and alt.legs:
+                        new_legs.extend(alt.legs)
+                        has_replacement = True
+                        continue
+                new_legs.append(leg)
+
+            if has_replacement:
+                label = _auto_route_label(Route(legs=new_legs))
+                new_routes.append(Route(legs=new_legs, label=label))
+
+        return new_routes
 
     # ═══════════════════════════════════════════════════
     #  고배차 버스 택시 대체
@@ -689,11 +792,11 @@ class HybridRouter:
         def _transit_sig(r: Route) -> str:
             return "|".join(l.detail for l in r.legs if l.mode.is_transit)
 
+        # gap이 있는 경로에 연결 leg 삽입
+        routes = [_fill_gaps(r) for r in routes]
+
         filtered: list[Route] = []
         for r in routes:
-            # 불연속 경로 제거 (leg 끝 좌표 ≠ 다음 leg 시작 좌표, 3km+ 갭)
-            if _has_gap(r):
-                continue
 
             # 전구간 택시: 다구간 분할 택시 제거 (단일 구간 택시 직행은 유지)
             modes = [l.mode for l in r.legs if l.mode != TransportMode.WALK]
@@ -869,13 +972,29 @@ def _collect_hubs(terminals, stations, max_terminals: int = 3, max_stations: int
     return hubs
 
 
-def _has_gap(r: Route, max_gap_m: float = 3000) -> bool:
-    """경로에 불연속 구간(leg 끝 ≠ 다음 leg 시작)이 있는지 확인."""
-    for i in range(len(r.legs) - 1):
-        gap = haversine_m(r.legs[i].end, r.legs[i + 1].start)
-        if gap > max_gap_m:
-            return True
-    return False
+def _fill_gaps(r: Route, min_gap_m: float = 300, max_gap_m: float = 30000) -> Route:
+    """경로의 불연속 구간에 연결 leg(도보/택시)을 자동 삽입."""
+    if len(r.legs) < 2:
+        return r
+    new_legs: list[RouteLeg] = [r.legs[0]]
+    for i in range(1, len(r.legs)):
+        prev = r.legs[i - 1]
+        curr = r.legs[i]
+        gap = haversine_m(prev.end, curr.start)
+        if gap > min_gap_m:
+            if gap > max_gap_m:
+                # 너무 큰 gap은 경로 자체가 비합리적 → 그대로 둠 (필터에서 처리)
+                new_legs.append(curr)
+                continue
+            # gap에 연결 leg 삽입
+            filler = make_access_leg(
+                prev.end, curr.start,
+                prev.end_name or "환승",
+                curr.start_name or "환승",
+            )
+            new_legs.append(filler)
+        new_legs.append(curr)
+    return Route(legs=new_legs, label=r.label)
 
 
 def _auto_route_label(r: Route) -> str:

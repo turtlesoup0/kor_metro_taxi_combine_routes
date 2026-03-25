@@ -49,6 +49,7 @@ class LegResponse(BaseModel):
     cost_won: int
     detail: str
     interval_min: float
+    taxi_reason: str = ""  # 택시 추천 이유 (택시 구간만)
 
 
 class RouteResponse(BaseModel):
@@ -118,7 +119,13 @@ async def search_routes(req: SearchRequest):
     result = []
     for route in routes:
         legs = []
-        for leg in route.legs:
+        route_legs = route.legs
+        for li, leg in enumerate(route_legs):
+            # 택시 추천 이유 판별
+            taxi_reason = ""
+            if leg.mode == TM.TAXI:
+                taxi_reason = _infer_taxi_reason(route_legs, li)
+
             legs.append(LegResponse(
                 mode=leg.mode.value,
                 start_lat=leg.start.lat, start_lng=leg.start.lng,
@@ -129,6 +136,7 @@ async def search_routes(req: SearchRequest):
                 cost_won=leg.cost_won,
                 detail=leg.detail,
                 interval_min=leg.interval_min,
+                taxi_reason=taxi_reason,
             ))
 
         # 택시 비용-편익 분석
@@ -159,6 +167,42 @@ async def search_routes(req: SearchRequest):
         routes=result,
         reference_transit_time_min=round(best_transit_time or 0, 0),
     )
+
+
+def _infer_taxi_reason(legs: list, taxi_idx: int) -> str:
+    """택시 구간의 추천 이유를 맥락에서 추론."""
+    from .models import TransportMode as TM
+
+    leg = legs[taxi_idx]
+    total = len(legs)
+    non_walk = [l for l in legs if l.mode != TM.WALK]
+
+    # 전구간 택시
+    if all(l.mode == TM.TAXI for l in non_walk):
+        return "전구간 택시 이동"
+
+    has_transit_before = any(l.mode.is_transit for l in legs[:taxi_idx])
+    has_transit_after = any(l.mode.is_transit for l in legs[taxi_idx + 1:])
+
+    # 중간 환승 구간 택시 (대중교통→택시→대중교통)
+    if has_transit_before and has_transit_after:
+        return "환승 구간 직접 연결 (대중교통 노선 미연결)"
+
+    # first-mile (출발지→첫 대중교통역)
+    if not has_transit_before and has_transit_after:
+        km = leg.distance_m / 1000
+        if km < 3:
+            return "출발지 인근 정류장까지 이동"
+        return "출발지↔대중교통역 노선 미연결"
+
+    # last-mile (마지막 대중교통역→도착지)
+    if has_transit_before and not has_transit_after:
+        km = leg.distance_m / 1000
+        if km < 3:
+            return "도착지 인근까지 이동"
+        return "대중교통역↔도착지 노선 미연결"
+
+    return "대중교통 대비 효율적 이동"
 
 
 # ── 지오코딩 (카카오 키워드 검색 프록시) ──

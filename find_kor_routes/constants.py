@@ -22,7 +22,6 @@ TRANSFER_WALK_MAX_MIN = 5.0        # 환승 도보 최대 시간 (분, 이하면
 
 # ── 탐색 기준 ──
 LONG_DISTANCE_THRESHOLD_M = 30_000  # 장거리 판정 기준 (m)
-MAX_TAXI_ONLY_KM = 100             # 택시 직행 최대 거리 (km)
 TAXI_PENALTY_THRESHOLD_KM = 30     # 택시 직행 패널티 시작 거리 (km)
 TAXI_PENALTY_PER_KM = 2.0          # 장거리 택시 km당 추가 스코어
 INCOMPLETE_ROUTE_THRESHOLD_M = 3000 # 불완전 경로 필터 기준 (m)
